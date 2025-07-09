@@ -57,14 +57,14 @@
 			<aside>
 				<h1 id="room-id" class="text-4xl text-green-500 font-bold text-center">1번 방</h1>
 				<div class="flex flex-col justify-start text-green-500 text-3xl gap-10 mt-10">
-					<div>이름</div>
-					<div id="high-score">최고 점수 : 0</div>
+					<div>{{ user_name }}</div>
+					<div id="high-score">최고 점수 : {{ user_high_score }}</div>
 					<div id="score">점수 : 0</div>
 					<div id="time">남은 시간 : 00초</div>
 				</div>
 				<div class="flex flex-col justify-start text-blue-500 text-3xl gap-10 mt-[50px]">
-					<div>상대 이름</div>
-					<div>점수 : 0</div>
+					<div id="opponent">상대 이름</div>
+					<div id="opponentScore">점수 : 0</div>
 				</div>
 			</aside>
 		</main>
@@ -77,8 +77,44 @@
 					text-black text-[300px] hidden z-[1000] rotate-14">
 			</div>
 		</div>
+		<div id="modal" class="hidden">
+			<div
+				class="modal-bg fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50"
+			>
+				<div
+					class="modal-container relative bg-white rounded-lg shadow-lg p-8 w-[600px] h-[400px] flex flex-col items-center justify-center"
+				>
+					<div id="modal-content"></div>
+				</div>
+			</div>
+		</div>
 
 		<script>
+			const socket = io('http://localhost:8000', {
+				withCredentials: true
+			});
+			const room_id = sessionStorage.getItem('room_id');
+			const roomId = document.getElementById('room-id')
+			roomId.textContent = room_id
+
+			let userId = ''
+
+			socket.on('connect', function() {
+				console.log('멀티페이지 소켓 연결');
+			});
+			socket.on('connect_success', function(data) {
+				userId = data.user_id
+				sessionStorage.setItem('user_Id', userId)
+			})
+			socket.on('game:start', function(data) {
+				const { players } = data
+				const opponent = players.filter((player)=> player.user_id !== userId)[0];
+				const opponentName = document.getElementById('opponent');
+				opponentName.textContent = opponent.name;
+				gameStartCountdown();
+			})
+			socket.emit('room:join',{ room_id });
+
 			const COLS = 10;
 			const ROWS = 15;
 			const BLOCK_SIZE = window.innerHeight * 0.06;
@@ -97,7 +133,6 @@
 				[KEY.RIGHT]: { dx: 1, dy: 0 },
 				[KEY.DOWN]: { dx: 0, dy: 1 }
 			};
-
 			const COLORS = ['cyan', 'blue', 'orange', 'yellow', 'green', 'purple', 'red'];
 
 			const BLOCK_SHAPES = [
@@ -127,6 +162,7 @@
 			};
 
 			let score = 0;
+			let opponentScore = 0;
 
 			function gameStartCountdown() {
 				const loader = document.querySelector('#loader')
@@ -187,7 +223,9 @@
 				drawGrid();
 				drawFixedBlocks();
 				if (game.current) drawCurrentBlock();
-				if (game.over) drawGameOver();
+				if (game.over) {
+					socketGameEnd()
+				}
 			}
 
 			function clear() {
@@ -232,14 +270,6 @@
 				block.blocks.forEach(([dx, dy]) => {
 					ctx.fillRect(block.x + dx, block.y + dy, 1, 1);
 				});
-			}
-
-			function drawGameOver() {
-				const ctx = game.ctx;
-				ctx.fillStyle = 'white';
-				ctx.font = '1.2px Arial';
-				ctx.textAlign = 'center';
-				ctx.fillText('GAME OVER', COLS / 2, ROWS / 2);
 			}
 
 			function generateBlock() {
@@ -352,11 +382,25 @@
 				const base = lines === 1 ? 100 : lines === 2 ? 300 : lines === 3 ? 500 : lines >= 4 ? 800 : 0;
 				const gained = isHardDrop ? base * 2 : base;
 				score += gained;
-				updateScore();
+				if(gained) updateScore(score);
 			}
 
-			function updateScore() {
-				document.getElementById('score').textContent = `점수: ${score}`;
+			function updateScore(totalScore = 0) {
+
+				socket.on('game:score_update', function(data) {
+					const { players } = data;
+					const totalOpponentScore = players.filter((player) => player.user_id !== userId)[0].score
+					if(totalOpponentScore !== opponentScore) {
+						opponentScore = totalOpponentScore
+						document.getElementById('opponentScore').textContent = `점수: ${opponentScore}`;
+					} else return
+				})
+
+				document.getElementById('score').textContent = `점수: ${totalScore}`;
+				socket.emit('game:score_update',{
+					room_id: room_id,
+					score: totalScore
+				})
 			}
 
 			function animate(now = 0) {
@@ -402,25 +446,58 @@
 				}
 			}
 
+			
+
+			function socketGameEnd() {
+				socket.on('game:end', function(data) {
+					console.log(data)
+					const {status} = data
+					if(status === 'waiting') {
+						openModal(score, status)
+					} else if(status === 'finished') {
+						console.log('우승자', data.winner)
+						console.log('점수ㅜㅜ',data.final_scores)
+						openModal(score, status)
+						// 소켓 disconnect
+						// 소켓 room:leave
+					}
+				})
+				socket.emit('game:end', {
+					room_id: room_id,
+					final_score: score
+				})
+			}
+
+			function openModal(score, status) {
+				const modal = document.getElementById("modal");
+				const modalContent = document.getElementById("modal-content");
+				const modalBg = document.querySelector(".modal-bg");
+				modal.classList.remove("hidden");
+				
+				if(status === 'waiting') {
+					const html = `
+						<div class="text-green-500 text-[32px]" >
+							상대방을 기다리는 중..
+						</div>
+					`
+					modalContent.innerHTML = html;
+				} else if(status === 'finished') {
+					const html = `
+						    <div class="flex flex-col justify-center items-center gap-12 text-center">
+      							<p class="text-[48px] font-bold text-green-500">승리!!!</p>
+      							<p class="text-[40px]">점수: ${score}</p>
+      							<button id="confirm-btn" class="mt-[22px] w-[180px] h-[72px] bg-green-500 text-white text-[40px] font-bold rounded-[20px] hover:bg-green-600 transition text-center items-centern">확인</button>
+							</div>
+						`
+						modalContent.innerHTML = html;
+						const confirmBtn = document.getElementById('confirm-btn')
+						confirmBtn.addEventListener('click',()=>{ window.location.href = 'main.html'})
+					}
+				}
+
 			initializeCanvas();
 			drawGrid();
 			document.addEventListener('keydown', onKeyDown);
-
-			const socket = io('http://localhost:8000', {
-				withCredentials: true
-			});
-			const room_id = sessionStorage.getItem('room_id');
-			const roomId = document.getElementById('room-id')
-			roomId.textContent = room_id
-
-			socket.on('connect', function() {
-				console.log('멀티페이지 소켓 연결');
-			});
-			socket.on('game:start', function() {
-				gameStartCountdown();
-			})
-			socket.emit('room:join',{ room_id });
-
 
 		</script>
 	</body>
